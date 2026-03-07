@@ -21,6 +21,7 @@ import { CheckpointReactor, type CheckpointReactorShape } from "../Services/Chec
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { CheckpointStoreError } from "../../checkpointing/Errors.ts";
 import { OrchestrationDispatchError } from "../Errors.ts";
+import { isGitRepository } from "../../git/isRepo.ts";
 
 type ReactorInput =
   | {
@@ -184,6 +185,7 @@ const make = Effect.gen(function* () {
 
     return { thread, cwd: sessionCwd };
   });
+  const isGitWorkspace = (cwd: string) => isGitRepository(cwd);
 
   const captureCheckpointFromTurnCompletion = Effect.fnUntraced(function* (
     event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>,
@@ -214,6 +216,14 @@ const make = Effect.gen(function* () {
       yield* Effect.logWarning("checkpoint capture skipped: no active provider session cwd", {
         threadId: thread.id,
         turnId,
+      });
+      return;
+    }
+    if (!isGitWorkspace(checkpointCwd)) {
+      yield* Effect.logDebug("checkpoint capture skipped for non-git workspace", {
+        threadId: thread.id,
+        turnId,
+        cwd: checkpointCwd,
       });
       return;
     }
@@ -342,6 +352,9 @@ const make = Effect.gen(function* () {
       });
       return;
     }
+    if (!isGitWorkspace(checkpointCwd)) {
+      return;
+    }
 
     const currentTurnCount = thread.checkpoints.reduce(
       (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
@@ -392,6 +405,9 @@ const make = Effect.gen(function* () {
       });
       return;
     }
+    if (!isGitWorkspace(checkpointCwd)) {
+      return;
+    }
 
     const currentTurnCount = thread.checkpoints.reduce(
       (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
@@ -435,6 +451,15 @@ const make = Effect.gen(function* () {
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
         detail: "No active provider session with workspace cwd is bound to this thread.",
+        createdAt: now,
+      }).pipe(Effect.catch(() => Effect.void));
+      return;
+    }
+    if (!isGitWorkspace(sessionRuntime.value.cwd)) {
+      yield* appendRevertFailureActivity({
+        threadId: event.payload.threadId,
+        turnCount: event.payload.turnCount,
+        detail: "Checkpoints are unavailable because this project is not a git repository.",
         createdAt: now,
       }).pipe(Effect.catch(() => Effect.void));
       return;
