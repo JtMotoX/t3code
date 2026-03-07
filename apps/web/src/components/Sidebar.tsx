@@ -31,6 +31,7 @@ import { serverConfigQueryOptions } from "../lib/serverReactQuery";
 import { readNativeApi } from "../nativeApi";
 import { type DraftThreadEnvMode, useComposerDraftStore } from "../composerDraftStore";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import { resolveWebSocketUrl, webSocketUrlToHttpOrigin } from "../wsUrl";
 import { toastManager } from "./ui/toast";
 import {
   getDesktopUpdateActionError,
@@ -218,21 +219,12 @@ function T3Wordmark() {
  * sources WsTransport uses, converting ws(s) to http(s).
  */
 function getServerHttpOrigin(): string {
-  const bridgeUrl = window.desktopBridge?.getWsUrl();
-  const envUrl = import.meta.env.VITE_WS_URL as string | undefined;
-  const wsUrl =
-    bridgeUrl && bridgeUrl.length > 0
-      ? bridgeUrl
-      : envUrl && envUrl.length > 0
-        ? envUrl
-        : `ws://${window.location.hostname}:${window.location.port}`;
-  // Parse to extract just the origin, dropping path/query (e.g. ?token=…)
-  const httpUrl = wsUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
-  try {
-    return new URL(httpUrl).origin;
-  } catch {
-    return httpUrl;
-  }
+  return webSocketUrlToHttpOrigin(
+    resolveWebSocketUrl({
+      bridgeUrl: window.desktopBridge?.getWsUrl(),
+      envUrl: import.meta.env.VITE_WS_URL as string | undefined,
+    }),
+  );
 }
 
 const serverHttpOrigin = getServerHttpOrigin();

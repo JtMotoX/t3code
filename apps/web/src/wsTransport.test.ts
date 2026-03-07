@@ -13,11 +13,13 @@ class MockWebSocket {
   static readonly CLOSING = 2;
   static readonly CLOSED = 3;
 
+  readonly url: string;
   readyState = MockWebSocket.CONNECTING;
   readonly sent: string[] = [];
   private readonly listeners = new Map<WsEventType, Set<WsListener>>();
 
-  constructor(_url: string) {
+  constructor(url: string) {
+    this.url = url;
     sockets.push(this);
   }
 
@@ -59,6 +61,7 @@ class MockWebSocket {
 }
 
 const originalWebSocket = globalThis.WebSocket;
+const originalWindow = globalThis.window;
 
 function getSocket(): MockWebSocket {
   const socket = sockets.at(-1);
@@ -84,10 +87,30 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.WebSocket = originalWebSocket;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: originalWindow,
+  });
   vi.restoreAllMocks();
 });
 
 describe("WsTransport", () => {
+  it("defaults to wss on https pages", () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: { protocol: "https:", hostname: "secure.example", port: "443" },
+        desktopBridge: undefined,
+      },
+    });
+
+    const transport = new WsTransport();
+
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]?.url).toBe("wss://secure.example:443");
+    transport.dispose();
+  });
+
   it("routes valid push envelopes to channel listeners", () => {
     const transport = new WsTransport("ws://localhost:3020");
     const socket = getSocket();
