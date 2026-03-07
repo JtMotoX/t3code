@@ -132,7 +132,7 @@ layer("CopilotAdapterLive startup", (it) => {
         provider: "copilot",
         threadId: asThreadId("thread-copilot-turn-map"),
         model: "gpt-5.4",
-        runtimeMode: "full-access",
+        runtimeMode: "approval-required",
       });
 
       yield* Stream.runCollect(Stream.take(adapter.streamEvents, 8)).pipe(Effect.asVoid);
@@ -233,6 +233,38 @@ layer("CopilotAdapterLive startup", (it) => {
         toolCompleted?.type === "item.completed" ? toolCompleted.payload.title : undefined,
         "bash",
       );
+    }),
+  );
+
+  it.effect("auto-approves Copilot permission requests in full-access mode", () =>
+    Effect.gen(function* () {
+      fakeClient.connected = false;
+      fakeClient.callLog.length = 0;
+      fakeClient.lastCreateSessionConfig = undefined;
+      fakeClient.session.handler = null;
+
+      const adapter = yield* CopilotAdapter;
+      yield* adapter.startSession({
+        provider: "copilot",
+        threadId: asThreadId("thread-copilot-full-access"),
+        model: "gpt-5.4",
+        runtimeMode: "full-access",
+      });
+
+      yield* Stream.runCollect(Stream.take(adapter.streamEvents, 4)).pipe(Effect.asVoid);
+
+      const onPermissionRequest = (fakeClient.lastCreateSessionConfig as
+        | FakeSessionConfig
+        | undefined)?.onPermissionRequest;
+      assert.ok(onPermissionRequest);
+      const result = yield* Effect.promise(() =>
+        onPermissionRequest({
+          kind: "read",
+          path: "/Users/zortos/junk/aaa.py",
+        } as never) as Promise<unknown>,
+      );
+
+      assert.deepStrictEqual(result, { kind: "approved" });
     }),
   );
 });

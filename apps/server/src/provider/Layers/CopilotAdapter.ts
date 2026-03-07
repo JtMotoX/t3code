@@ -815,10 +815,14 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
     const createInteractionHandlers = (
       threadId: ThreadId,
       getCurrentTurnId: () => TurnId | undefined,
+      getRuntimeMode: () => ProviderSession["runtimeMode"],
       pendingApprovalResolvers: Map<string, PendingApprovalRequest>,
       pendingUserInputResolvers: Map<string, PendingUserInputRequest>,
     ) => {
       const onPermissionRequest = (request: PermissionRequest) =>
+        getRuntimeMode() === "full-access"
+          ? Promise.resolve<PermissionRequestResult>({ kind: "approved" })
+          :
         new Promise<PermissionRequestResult>((resolve) => {
           const requestId = `copilot-approval-${randomUUID()}`;
           const turnId = getCurrentTurnId();
@@ -972,6 +976,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
           const handlers = createInteractionHandlers(
             record.threadId,
             () => record.currentTurnId,
+            () => record.runtimeMode,
             record.pendingApprovalResolvers,
             record.pendingUserInputResolvers,
           );
@@ -1136,6 +1141,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
         const handlers = createInteractionHandlers(
           input.threadId,
           () => sessionRecord?.currentTurnId,
+          () => sessionRecord?.runtimeMode ?? input.runtimeMode,
           pendingApprovalResolvers,
           pendingUserInputResolvers,
         );

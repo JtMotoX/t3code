@@ -77,7 +77,6 @@ import {
   type ProviderPickerKind,
   PROVIDER_OPTIONS,
   deriveWorkLogEntries,
-  hasToolActivityForTurn,
   isLatestTurnSettled,
   formatElapsed,
   formatTimestamp,
@@ -976,10 +975,6 @@ export default function ChatView({ threadId }: ChatViewProps) {
     () => deriveWorkLogEntries(threadActivities, undefined, latestUserMessageCreatedAt),
     [latestUserMessageCreatedAt, threadActivities],
   );
-  const latestTurnHasToolActivity = useMemo(
-    () => hasToolActivityForTurn(threadActivities, activeLatestTurn?.turnId),
-    [activeLatestTurn?.turnId, threadActivities],
-  );
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const activePendingDraftAnswers = useMemo(
     () =>
@@ -1220,17 +1215,21 @@ export default function ChatView({ threadId }: ChatViewProps) {
 
   const completionSummary = useMemo(() => {
     if (!latestTurnSettled) return null;
-    if (!activeLatestTurn?.startedAt) return null;
-    if (!activeLatestTurn.completedAt) return null;
-    if (!latestTurnHasToolActivity) return null;
+    if (!activeLatestTurn?.completedAt) return null;
+    if (workLogEntries.length === 0) return null;
 
-    const elapsed = formatElapsed(activeLatestTurn.startedAt, activeLatestTurn.completedAt);
+    const summaryStartAt =
+      latestUserMessageCreatedAt ?? workLogEntries[0]?.createdAt ?? activeLatestTurn.startedAt;
+    if (!summaryStartAt) return null;
+
+    const elapsed = formatElapsed(summaryStartAt, activeLatestTurn.completedAt);
     return elapsed ? `Worked for ${elapsed}` : null;
   }, [
     activeLatestTurn?.completedAt,
     activeLatestTurn?.startedAt,
-    latestTurnHasToolActivity,
     latestTurnSettled,
+    latestUserMessageCreatedAt,
+    workLogEntries,
   ]);
   const completionDividerBeforeEntryId = useMemo(() => {
     if (!latestTurnSettled) return null;

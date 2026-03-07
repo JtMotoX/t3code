@@ -1,5 +1,4 @@
 import {
-  DEFAULT_REASONING_EFFORT_BY_PROVIDER,
   ProjectId,
   REASONING_EFFORT_OPTIONS_BY_PROVIDER,
   ThreadId,
@@ -914,12 +913,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
         if (threadId.length === 0) {
           return;
         }
-        const nextEffort =
-          effort &&
-          REASONING_EFFORT_VALUES.has(effort) &&
-          effort !== DEFAULT_REASONING_EFFORT_BY_PROVIDER.codex
-            ? effort
-            : null;
+        const nextEffort = effort && REASONING_EFFORT_VALUES.has(effort) ? effort : null;
         set((state) => {
           const existing = state.draftsByThreadId[threadId];
           if (!existing && nextEffort === null) {
