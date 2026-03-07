@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  type CodexReasoningEffort,
   EventId,
   type ProviderApprovalDecision,
   ProviderItemId,
@@ -16,6 +17,7 @@ import {
 } from "@t3tools/contracts";
 import {
   CopilotClient,
+  type ModelInfo,
   type CopilotSession,
   type PermissionRequest,
   type PermissionRequestResult,
@@ -74,12 +76,14 @@ interface PendingUserInputRequest {
 
 interface ActiveCopilotSession {
   readonly client: CopilotClient;
-  readonly session: CopilotSession;
+  session: CopilotSession;
   readonly threadId: ThreadId;
   readonly createdAt: string;
   readonly runtimeMode: ProviderSession["runtimeMode"];
   cwd: string | undefined;
+  configDir: string | undefined;
   model: string | undefined;
+  reasoningEffort: CodexReasoningEffort | undefined;
   updatedAt: string;
   lastError: string | undefined;
   currentTurnId: TurnId | undefined;
@@ -138,6 +142,24 @@ function trimToUndefined(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function mapSupportedModelsById(models: ReadonlyArray<ModelInfo>) {
+  return new Map(models.map((model) => [model.id, model]));
+}
+
+function getCopilotReasoningEffort(
+  modelOptions: unknown,
+) {
+  const record = asRecord(modelOptions);
+  const copilot = asRecord(record?.copilot);
+  const reasoningEffort = normalizeString(copilot?.reasoningEffort);
+  return reasoningEffort === "low" ||
+    reasoningEffort === "medium" ||
+    reasoningEffort === "high" ||
+    reasoningEffort === "xhigh"
+    ? reasoningEffort
+    : undefined;
 }
 
 function extractResumeSessionId(resumeCursor: unknown): string | undefined {
@@ -755,6 +777,178 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
       }
     };
 
+    const createInteractionHandlers = (
+      threadId: ThreadId,
+      pendingApprovalResolvers: Map<string, PendingApprovalRequest>,
+      pendingUserInputResolvers: Map<string, PendingUserInputRequest>,
+    ) => {
+      const onPermissionRequest = (request: PermissionRequest) =>
+        new Promise<PermissionRequestResult>((resolve) => {
+          const requestId = `copilot-approval-${randomUUID()}`;
+          pendingApprovalResolvers.set(requestId, {
+            requestType: requestTypeFromPermissionRequest(request),
+            resolve,
+          });
+          void emitRuntimeEvents([
+            makeSyntheticEvent(
+              threadId,
+              "request.opened",
+              {
+                requestType: requestTypeFromPermissionRequest(request),
+                ...(requestDetailFromPermissionRequest(request)
+                  ? { detail: requestDetailFromPermissionRequest(request) }
+                  : {}),
+                args: request,
+              },
+              { requestId },
+            ),
+          ]);
+        });
+
+      const onUserInputRequest = (request: CopilotUserInputRequest) =>
+        new Promise<CopilotUserInputResponse>((resolve) => {
+          const requestId = `copilot-user-input-${randomUUID()}`;
+          pendingUserInputResolvers.set(requestId, {
+            request,
+            resolve,
+          });
+          void emitRuntimeEvents([
+            makeSyntheticEvent(
+              threadId,
+              "user-input.requested",
+              {
+                questions: [
+                  {
+                    id: USER_INPUT_QUESTION_ID,
+                    header: "GitHub Copilot",
+                    question: request.question,
+                    options: (request.choices ?? []).map((choice: string) => ({
+                      label: choice,
+                      description: choice,
+                    })),
+                  },
+                ],
+              },
+              { requestId },
+            ),
+          ]);
+        });
+
+      return {
+        onPermissionRequest,
+        onUserInputRequest,
+      };
+    };
+
+    const validateSessionConfiguration = (input: {
+      readonly client: CopilotClient;
+      readonly threadId: ThreadId;
+      readonly model: string | undefined;
+      readonly reasoningEffort: CodexReasoningEffort | undefined;
+    }) =>
+      Effect.gen(function* () {
+        if (!input.model && !input.reasoningEffort) {
+          return;
+        }
+
+        const supportedModels = mapSupportedModelsById(
+          yield* Effect.tryPromise({
+            try: () => input.client.listModels(),
+            catch: (cause) =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                detail: toMessage(cause, "Failed to load GitHub Copilot model metadata."),
+                cause,
+              }),
+          }),
+        );
+        const selectedModel = input.model ? supportedModels.get(input.model) : undefined;
+
+        if (input.model && !selectedModel) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "session.model",
+            issue: `GitHub Copilot model '${input.model}' is not available in the current Copilot runtime.`,
+          });
+        }
+
+        if (!input.reasoningEffort) {
+          return;
+        }
+
+        if (!selectedModel) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "session.reasoningEffort",
+            issue: "GitHub Copilot reasoning effort requires an explicit supported model selection.",
+          });
+        }
+
+        const supportedReasoningEfforts = selectedModel.supportedReasoningEfforts ?? [];
+        if (supportedReasoningEfforts.length === 0) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "session.reasoningEffort",
+            issue: `GitHub Copilot model '${selectedModel.id}' does not support reasoning effort configuration.`,
+          });
+        }
+
+        if (!supportedReasoningEfforts.includes(input.reasoningEffort)) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "session.reasoningEffort",
+            issue: `GitHub Copilot model '${selectedModel.id}' does not support reasoning effort '${input.reasoningEffort}'.`,
+          });
+        }
+      });
+
+    const reconfigureSession = (
+      record: ActiveCopilotSession,
+      input: {
+        readonly model: string | undefined;
+        readonly reasoningEffort: CodexReasoningEffort | undefined;
+      },
+    ) =>
+      Effect.tryPromise({
+        try: async () => {
+          const sessionId = record.session.sessionId;
+          const previousSession = record.session;
+          const previousUnsubscribe = record.unsubscribe;
+          previousUnsubscribe();
+          await previousSession.destroy();
+
+          const handlers = createInteractionHandlers(
+            record.threadId,
+            record.pendingApprovalResolvers,
+            record.pendingUserInputResolvers,
+          );
+          const nextSession = await record.client.resumeSession(sessionId, {
+            ...handlers,
+            ...(input.model ? { model: input.model } : {}),
+            ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+            ...(record.cwd ? { workingDirectory: record.cwd } : {}),
+            ...(record.configDir ? { configDir: record.configDir } : {}),
+            streaming: true,
+          });
+
+          record.session = nextSession;
+          record.model = input.model;
+          record.reasoningEffort = input.reasoningEffort;
+          record.updatedAt = new Date().toISOString();
+          record.unsubscribe = nextSession.on((event) => {
+            handleSessionEvent(record, event);
+          });
+        },
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session.reconfigure",
+            detail: toMessage(cause, "Failed to reconfigure GitHub Copilot session."),
+            cause,
+          }),
+      });
+
     const createSessionRecord = (input: {
       readonly threadId: ThreadId;
       readonly client: CopilotClient;
@@ -763,7 +957,9 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
       readonly pendingApprovalResolvers: Map<string, PendingApprovalRequest>;
       readonly pendingUserInputResolvers: Map<string, PendingUserInputRequest>;
       readonly cwd: string | undefined;
+      readonly configDir: string | undefined;
       readonly model: string | undefined;
+      readonly reasoningEffort: CodexReasoningEffort | undefined;
     }): ActiveCopilotSession => ({
       client: input.client,
       session: input.session,
@@ -771,7 +967,9 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
       createdAt: new Date().toISOString(),
       runtimeMode: input.runtimeMode,
       cwd: input.cwd,
+      configDir: input.configDir,
       model: input.model,
+      reasoningEffort: input.reasoningEffort,
       updatedAt: new Date().toISOString(),
       lastError: undefined,
       currentTurnId: undefined,
@@ -871,75 +1069,36 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
         });
         const pendingApprovalResolvers = new Map<string, PendingApprovalRequest>();
         const pendingUserInputResolvers = new Map<string, PendingUserInputRequest>();
+        const reasoningEffort = getCopilotReasoningEffort(input.modelOptions);
+        const handlers = createInteractionHandlers(
+          input.threadId,
+          pendingApprovalResolvers,
+          pendingUserInputResolvers,
+        );
 
-        const onPermissionRequest = (request: PermissionRequest) =>
-          new Promise<PermissionRequestResult>((resolve) => {
-            const requestId = `copilot-approval-${randomUUID()}`;
-            pendingApprovalResolvers.set(requestId, {
-              requestType: requestTypeFromPermissionRequest(request),
-              resolve,
-            });
-            void emitRuntimeEvents([
-              makeSyntheticEvent(
-                input.threadId,
-                "request.opened",
-                {
-                  requestType: requestTypeFromPermissionRequest(request),
-                  ...(requestDetailFromPermissionRequest(request)
-                    ? { detail: requestDetailFromPermissionRequest(request) }
-                    : {}),
-                  args: request,
-                },
-                { requestId },
-              ),
-            ]);
-          });
-
-        const onUserInputRequest = (request: CopilotUserInputRequest) =>
-          new Promise<CopilotUserInputResponse>((resolve) => {
-            const requestId = `copilot-user-input-${randomUUID()}`;
-            pendingUserInputResolvers.set(requestId, {
-              request,
-              resolve,
-            });
-            void emitRuntimeEvents([
-              makeSyntheticEvent(
-                input.threadId,
-                "user-input.requested",
-                {
-                  questions: [
-                    {
-                      id: USER_INPUT_QUESTION_ID,
-                      header: "GitHub Copilot",
-                      question: request.question,
-                      options: (request.choices ?? []).map((choice: string) => ({
-                        label: choice,
-                        description: choice,
-                      })),
-                    },
-                  ],
-                },
-                { requestId },
-              ),
-            ]);
-          });
+        yield* validateSessionConfiguration({
+          client,
+          threadId: input.threadId,
+          model: input.model,
+          reasoningEffort,
+        });
 
         const session = yield* Effect.tryPromise({
           try: async () => {
             if (resumeSessionId) {
               return client.resumeSession(resumeSessionId, {
-                onPermissionRequest,
-                onUserInputRequest,
+                ...handlers,
                 ...(input.model ? { model: input.model } : {}),
+                ...(reasoningEffort ? { reasoningEffort } : {}),
                 ...(input.cwd ? { workingDirectory: input.cwd } : {}),
                 ...(configDir ? { configDir } : {}),
                 streaming: true,
               });
             }
             return client.createSession({
-              onPermissionRequest,
-              onUserInputRequest,
+              ...handlers,
               ...(input.model ? { model: input.model } : {}),
+              ...(reasoningEffort ? { reasoningEffort } : {}),
               ...(input.cwd ? { workingDirectory: input.cwd } : {}),
               ...(configDir ? { configDir } : {}),
               streaming: true,
@@ -962,7 +1121,9 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
           pendingApprovalResolvers,
           pendingUserInputResolvers,
           cwd: input.cwd,
+          configDir,
           model: input.model,
+          reasoningEffort,
         });
         const unsubscribe = session.on((event) => {
           handleSessionEvent(record, event);
@@ -981,6 +1142,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
             config: {
               ...(input.cwd ? { cwd: input.cwd } : {}),
               ...(input.model ? { model: input.model } : {}),
+              ...(reasoningEffort ? { reasoningEffort } : {}),
               ...(configDir ? { configDir } : {}),
               streaming: true,
             },
@@ -1010,6 +1172,14 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
     const sendTurn: CopilotAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const record = yield* getSessionRecord(input.threadId);
+        const explicitReasoningEffort = getCopilotReasoningEffort(input.modelOptions);
+        const nextModel = input.model ?? record.model;
+        const nextReasoningEffort =
+          explicitReasoningEffort !== undefined
+            ? explicitReasoningEffort
+            : input.model && input.model !== record.model
+              ? undefined
+              : record.reasoningEffort;
         const attachments = (input.attachments ?? [])
           .map((attachment) => {
             const attachmentPath = resolveAttachmentPath({
@@ -1030,19 +1200,17 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
             };
           });
 
-        if (input.model && input.model !== record.model) {
-          yield* Effect.tryPromise({
-            try: async () => {
-              await record.session.setModel(input.model!);
-              record.model = input.model;
-            },
-            catch: (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "session.setModel",
-                detail: toMessage(cause, "Failed to switch GitHub Copilot model."),
-                cause,
-              }),
+        yield* validateSessionConfiguration({
+          client: record.client,
+          threadId: input.threadId,
+          model: nextModel,
+          reasoningEffort: nextReasoningEffort,
+        });
+
+        if (nextModel !== record.model || nextReasoningEffort !== record.reasoningEffort) {
+          yield* reconfigureSession(record, {
+            model: nextModel,
+            reasoningEffort: nextReasoningEffort,
           });
         }
 

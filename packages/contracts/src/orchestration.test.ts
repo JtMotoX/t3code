@@ -199,7 +199,12 @@ it.effect("accepts provider-scoped startup options in thread.turn.start", () =>
         attachments: [],
       },
       provider: "copilot",
-      model: "gpt-5.4",
+      model: "gpt-5.3-codex",
+      modelOptions: {
+        copilot: {
+          reasoningEffort: "high",
+        },
+      },
       providerOptions: {
         copilot: {
           cliPath: "/usr/local/bin/copilot",
@@ -209,6 +214,7 @@ it.effect("accepts provider-scoped startup options in thread.turn.start", () =>
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.provider, "copilot");
+    assert.strictEqual(parsed.modelOptions?.copilot?.reasoningEffort, "high");
     assert.strictEqual(parsed.providerOptions?.copilot?.cliPath, "/usr/local/bin/copilot");
     assert.strictEqual(parsed.providerOptions?.copilot?.configDir, "/tmp/.copilot");
   }),

@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { type ProviderKind } from "@t3tools/contracts";
 import { getModelOptions, normalizeModelSlug } from "@t3tools/shared/model";
 import { ZapIcon } from "lucide-react";
@@ -111,6 +111,17 @@ function SettingsRouteView() {
   const [customModelErrorByProvider, setCustomModelErrorByProvider] = useState<
     Partial<Record<ProviderKind, string | null>>
   >({});
+  const builtInModelOptionsByProvider = useMemo<Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>>>(
+    () => ({
+      codex: getModelOptions("codex"),
+      copilot:
+        serverConfigQuery.data?.providers.find((status) => status.provider === "copilot")?.models?.map((model) => ({
+          slug: model.id,
+          name: model.name,
+        })) ?? getModelOptions("copilot"),
+    }),
+    [serverConfigQuery.data?.providers],
+  );
 
   const codexBinaryPath = settings.codexBinaryPath;
   const codexHomePath = settings.codexHomePath;
@@ -147,7 +158,11 @@ function SettingsRouteView() {
       }));
       return;
     }
-    if (getModelOptions(provider).some((option) => option.slug === normalized)) {
+    if (
+      builtInModelOptionsByProvider[provider].some(
+        (option: { slug: string; name: string }) => option.slug === normalized,
+      )
+    ) {
       setCustomModelErrorByProvider((existing) => ({
         ...existing,
         [provider]: "That model is already built in.",
@@ -178,7 +193,7 @@ function SettingsRouteView() {
       ...existing,
       [provider]: null,
     }));
-  }, [customModelInputByProvider, settings, updateSettings]);
+  }, [builtInModelOptionsByProvider, customModelInputByProvider, settings, updateSettings]);
 
   const removeCustomModel = useCallback(
     (provider: ProviderKind, slug: string) => {

@@ -10,10 +10,11 @@
  */
 import type {
   ServerProviderAuthStatus,
+  ServerProviderModel,
   ServerProviderStatus,
   ServerProviderStatusState,
 } from "@t3tools/contracts";
-import { CopilotClient } from "@github/copilot-sdk";
+import { CopilotClient, type ModelInfo } from "@github/copilot-sdk";
 import { Effect, Layer, Option, Result, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
@@ -34,6 +35,18 @@ export interface CommandResult {
 interface CopilotHealthProbeError {
   readonly _tag: "CopilotHealthProbeError";
   readonly cause: unknown;
+}
+
+function mapCopilotModel(model: ModelInfo): ServerProviderModel {
+  return {
+    id: model.id,
+    name: model.name,
+    supportsReasoningEffort: (model.supportedReasoningEfforts?.length ?? 0) > 0,
+    ...(model.supportedReasoningEfforts && model.supportedReasoningEfforts.length > 0
+      ? { supportedReasoningEfforts: [...model.supportedReasoningEfforts] }
+      : {}),
+    ...(model.defaultReasoningEffort ? { defaultReasoningEffort: model.defaultReasoningEffort } : {}),
+  } satisfies ServerProviderModel;
 }
 
 function nonEmptyTrimmed(value: string | undefined): string | undefined {
@@ -309,7 +322,9 @@ export const checkCopilotProviderStatus: Effect.Effect<ServerProviderStatus> = E
             client.getStatus(),
             client.getAuthStatus().catch(() => undefined),
           ]);
-          return { status, authStatus };
+          const models =
+            authStatus?.isAuthenticated === true ? await client.listModels().catch(() => undefined) : undefined;
+          return { status, authStatus, models };
         } finally {
           await client.stop().catch(() => []);
         }
@@ -362,6 +377,9 @@ export const checkCopilotProviderStatus: Effect.Effect<ServerProviderStatus> = E
       available: true,
       authStatus,
       checkedAt,
+      ...(probe.success.value.models && probe.success.value.models.length > 0
+        ? { models: probe.success.value.models.map(mapCopilotModel) }
+        : {}),
       ...(probe.success.value.authStatus?.statusMessage
         ? { message: probe.success.value.authStatus.statusMessage }
         : probe.success.value.status?.version

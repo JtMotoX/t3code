@@ -151,6 +151,9 @@ function toLegacyProvider(providerName: string | null): ProviderKind {
 
 const CODEX_MODEL_SLUGS = new Set<string>(getModelOptions("codex").map((option) => option.slug));
 const COPILOT_MODEL_SLUGS = new Set<string>(getModelOptions("copilot").map((option) => option.slug));
+const AMBIGUOUS_PROVIDER_MODEL_SLUGS = new Set(
+  [...CODEX_MODEL_SLUGS].filter((slug) => COPILOT_MODEL_SLUGS.has(slug)),
+);
 
 function inferProviderForThreadModel(input: {
   readonly model: string;
@@ -160,7 +163,11 @@ function inferProviderForThreadModel(input: {
     return input.sessionProviderName;
   }
   const normalizedCopilot = normalizeModelSlug(input.model, "copilot");
-  if (normalizedCopilot && COPILOT_MODEL_SLUGS.has(normalizedCopilot)) {
+  if (
+    normalizedCopilot &&
+    COPILOT_MODEL_SLUGS.has(normalizedCopilot) &&
+    !AMBIGUOUS_PROVIDER_MODEL_SLUGS.has(normalizedCopilot)
+  ) {
     return "copilot";
   }
   const normalizedCodex = normalizeModelSlug(input.model, "codex");
@@ -214,18 +221,20 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
     .filter((thread) => thread.deletedAt === null)
     .map((thread) => {
       const existing = existingThreadById.get(thread.id);
+      const inferredProvider = inferProviderForThreadModel({
+        model: thread.model,
+        sessionProviderName: thread.session?.providerName ?? null,
+      });
+      const normalizedKnownProviderModel = normalizeModelSlug(thread.model, inferredProvider);
       return {
         id: thread.id,
         codexThreadId: null,
         projectId: thread.projectId,
         title: thread.title,
-        model: resolveModelSlugForProvider(
-          inferProviderForThreadModel({
-            model: thread.model,
-            sessionProviderName: thread.session?.providerName ?? null,
-          }),
-          thread.model,
-        ),
+        model:
+          thread.session?.providerName === "copilot"
+            ? (normalizedKnownProviderModel ?? thread.model)
+            : resolveModelSlugForProvider(inferredProvider, thread.model),
         runtimeMode: thread.runtimeMode,
         interactionMode: thread.interactionMode,
         session: thread.session
