@@ -186,6 +186,34 @@ it.effect("accepts provider-scoped model options in thread.turn.start", () =>
   }),
 );
 
+it.effect("accepts provider-scoped startup options in thread.turn.start", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeThreadTurnStartCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-provider-options",
+      threadId: "thread-2",
+      message: {
+        messageId: "msg-provider-options",
+        role: "user",
+        text: "hello",
+        attachments: [],
+      },
+      provider: "copilot",
+      model: "gpt-5.4",
+      providerOptions: {
+        copilot: {
+          cliPath: "/usr/local/bin/copilot",
+          configDir: "/tmp/.copilot",
+        },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(parsed.provider, "copilot");
+    assert.strictEqual(parsed.providerOptions?.copilot?.cliPath, "/usr/local/bin/copilot");
+    assert.strictEqual(parsed.providerOptions?.copilot?.configDir, "/tmp/.copilot");
+  }),
+);
+
 it.effect(
   "decodes thread.turn-start-requested defaults for provider, runtime mode, and interaction mode",
   () =>

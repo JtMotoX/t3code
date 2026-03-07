@@ -4,8 +4,9 @@ import {
   EventId,
   type OrchestrationEvent,
   type ProviderModelOptions,
-  type ProviderKind,
+  ProviderKind,
   type ProviderServiceTier,
+  type ProviderStartOptions,
   type OrchestrationSession,
   ThreadId,
   type ProviderSession,
@@ -203,6 +204,7 @@ const make = Effect.gen(function* () {
       readonly model?: string;
       readonly modelOptions?: ProviderModelOptions;
       readonly serviceTier?: ProviderServiceTier | null;
+      readonly providerOptions?: ProviderStartOptions;
     },
   ) {
     const readModel = yield* orchestrationEngine.getReadModel();
@@ -212,8 +214,10 @@ const make = Effect.gen(function* () {
     }
 
     const desiredRuntimeMode = thread.runtimeMode;
-    const currentProvider: ProviderKind | undefined =
-      thread.session?.providerName === "codex" ? thread.session.providerName : undefined;
+    const currentProvider =
+      thread.session?.providerName && Schema.is(ProviderKind)(thread.session.providerName)
+        ? thread.session.providerName
+        : undefined;
     const preferredProvider: ProviderKind | undefined = options?.provider ?? currentProvider;
     const desiredModel = options?.model ?? thread.model;
     const effectiveCwd = resolveThreadWorkspaceCwd({
@@ -239,6 +243,7 @@ const make = Effect.gen(function* () {
         ...(desiredModel ? { model: desiredModel } : {}),
         ...(options?.serviceTier !== undefined ? { serviceTier: options.serviceTier } : {}),
         ...(options?.modelOptions !== undefined ? { modelOptions: options.modelOptions } : {}),
+        ...(options?.providerOptions !== undefined ? { providerOptions: options.providerOptions } : {}),
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         runtimeMode: desiredRuntimeMode,
       });
@@ -322,11 +327,12 @@ const make = Effect.gen(function* () {
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly provider?: ProviderKind;
-    readonly model?: string;
-    readonly serviceTier?: ProviderServiceTier | null;
-    readonly modelOptions?: ProviderModelOptions;
-    readonly interactionMode?: "default" | "plan";
-    readonly createdAt: string;
+      readonly model?: string;
+      readonly serviceTier?: ProviderServiceTier | null;
+      readonly modelOptions?: ProviderModelOptions;
+      readonly providerOptions?: ProviderStartOptions;
+      readonly interactionMode?: "default" | "plan";
+      readonly createdAt: string;
   }) {
     const thread = yield* resolveThread(input.threadId);
     if (!thread) {
@@ -337,6 +343,7 @@ const make = Effect.gen(function* () {
       ...(input.model !== undefined ? { model: input.model } : {}),
       ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}),
       ...(input.modelOptions !== undefined ? { modelOptions: input.modelOptions } : {}),
+      ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions } : {}),
     });
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
     const normalizedAttachments = input.attachments ?? [];
@@ -472,6 +479,9 @@ const make = Effect.gen(function* () {
       ...(event.payload.model !== undefined ? { model: event.payload.model } : {}),
       ...(event.payload.serviceTier !== undefined ? { serviceTier: event.payload.serviceTier } : {}),
       ...(event.payload.modelOptions !== undefined ? { modelOptions: event.payload.modelOptions } : {}),
+      ...(event.payload.providerOptions !== undefined
+        ? { providerOptions: event.payload.providerOptions }
+        : {}),
       interactionMode: event.payload.interactionMode,
       createdAt: event.payload.createdAt,
     });

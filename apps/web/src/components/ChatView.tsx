@@ -163,6 +163,7 @@ import {
 import {
   ClaudeAI,
   CursorIcon,
+  GitHubIcon,
   Gemini,
   Icon,
   OpenAI,
@@ -769,16 +770,18 @@ export default function ChatView({ threadId }: ChatViewProps) {
       activeThread.session !== null),
   );
   const selectedServiceTierSetting = settings.codexServiceTier;
-  const selectedServiceTier = resolveAppServiceTier(selectedServiceTierSetting);
   const lockedProvider: ProviderKind | null = hasThreadStarted
     ? (sessionProvider ?? selectedProviderByThreadId ?? null)
     : null;
   const selectedProvider: ProviderKind = lockedProvider ?? selectedProviderByThreadId ?? "codex";
+  const selectedServiceTier =
+    selectedProvider === "codex" ? resolveAppServiceTier(selectedServiceTierSetting) : null;
   const baseThreadModel = resolveModelSlugForProvider(
     selectedProvider,
     activeThread?.model ?? activeProject?.model ?? getDefaultModel(selectedProvider),
   );
-  const customModelsForSelectedProvider = settings.customCodexModels;
+  const customModelsForSelectedProvider =
+    selectedProvider === "copilot" ? settings.customCopilotModels : settings.customCodexModels;
   const selectedModel = useMemo(() => {
     const draftModel = composerDraft.model;
     if (!draftModel) {
@@ -805,6 +808,29 @@ export default function ChatView({ threadId }: ChatViewProps) {
     };
     return Object.keys(codexOptions).length > 0 ? { codex: codexOptions } : undefined;
   }, [selectedCodexFastModeEnabled, selectedEffort, selectedProvider, supportsReasoningEffort]);
+  const selectedProviderOptionsForDispatch = useMemo(() => {
+    if (selectedProvider === "codex") {
+      const codexOptions = {
+        ...(settings.codexBinaryPath.trim().length > 0 ? { binaryPath: settings.codexBinaryPath.trim() } : {}),
+        ...(settings.codexHomePath.trim().length > 0 ? { homePath: settings.codexHomePath.trim() } : {}),
+      };
+      return Object.keys(codexOptions).length > 0 ? { codex: codexOptions } : undefined;
+    }
+
+    const copilotOptions = {
+      ...(settings.copilotCliPath.trim().length > 0 ? { cliPath: settings.copilotCliPath.trim() } : {}),
+      ...(settings.copilotConfigDir.trim().length > 0
+        ? { configDir: settings.copilotConfigDir.trim() }
+        : {}),
+    };
+    return Object.keys(copilotOptions).length > 0 ? { copilot: copilotOptions } : undefined;
+  }, [
+    selectedProvider,
+    settings.codexBinaryPath,
+    settings.codexHomePath,
+    settings.copilotCliPath,
+    settings.copilotConfigDir,
+  ]);
   const selectedModelForPicker = selectedModel;
   const modelOptionsByProvider = useMemo(
     () => getCustomModelOptionsByProvider(settings),
@@ -2482,7 +2508,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
       }
       const title = truncateTitle(titleSeed);
       let threadCreateModel: ModelSlug =
-        selectedModel || (activeProject.model as ModelSlug) || DEFAULT_MODEL_BY_PROVIDER.codex;
+        selectedModel ||
+        (activeProject.model as ModelSlug) ||
+        DEFAULT_MODEL_BY_PROVIDER[selectedProvider];
 
       if (isLocalDraftThread) {
         await api.orchestration.dispatchCommand({
@@ -2563,6 +2591,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
         serviceTier: selectedServiceTier,
         ...(selectedModelOptionsForDispatch
           ? { modelOptions: selectedModelOptionsForDispatch }
+          : {}),
+        ...(selectedProviderOptionsForDispatch
+          ? { providerOptions: selectedProviderOptionsForDispatch }
           : {}),
         provider: selectedProvider,
         assistantDeliveryMode: settings.enableAssistantStreaming ? "streaming" : "buffered",
@@ -2839,6 +2870,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
           ...(selectedModelOptionsForDispatch
             ? { modelOptions: selectedModelOptionsForDispatch }
             : {}),
+          ...(selectedProviderOptionsForDispatch
+            ? { providerOptions: selectedProviderOptionsForDispatch }
+            : {}),
           assistantDeliveryMode: settings.enableAssistantStreaming ? "streaming" : "buffered",
           runtimeMode,
           interactionMode: nextInteractionMode,
@@ -2868,6 +2902,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       runtimeMode,
       selectedModel,
       selectedModelOptionsForDispatch,
+      selectedProviderOptionsForDispatch,
       selectedProvider,
       setComposerDraftInteractionMode,
       setThreadError,
@@ -2899,7 +2934,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       selectedModel ||
       (activeThread.model as ModelSlug) ||
       (activeProject.model as ModelSlug) ||
-      DEFAULT_MODEL_BY_PROVIDER.codex;
+      DEFAULT_MODEL_BY_PROVIDER[selectedProvider];
 
     sendInFlightRef.current = true;
     setSendPhase("sending-turn");
@@ -2937,6 +2972,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
           model: selectedModel || undefined,
           ...(selectedModelOptionsForDispatch
             ? { modelOptions: selectedModelOptionsForDispatch }
+            : {}),
+          ...(selectedProviderOptionsForDispatch
+            ? { providerOptions: selectedProviderOptionsForDispatch }
             : {}),
           assistantDeliveryMode: settings.enableAssistantStreaming ? "streaming" : "buffered",
           runtimeMode,
@@ -2985,6 +3023,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
     runtimeMode,
     selectedModel,
     selectedModelOptionsForDispatch,
+    selectedProviderOptionsForDispatch,
     selectedProvider,
     settings.enableAssistantStreaming,
     syncServerReadModel,
@@ -3000,7 +3039,11 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setComposerDraftProvider(activeThread.id, provider);
       setComposerDraftModel(
         activeThread.id,
-        resolveAppModelSelection(provider, settings.customCodexModels, model),
+        resolveAppModelSelection(
+          provider,
+          provider === "copilot" ? settings.customCopilotModels : settings.customCodexModels,
+          model,
+        ),
       );
       scheduleComposerFocus();
     },
@@ -3010,6 +3053,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       scheduleComposerFocus,
       setComposerDraftModel,
       setComposerDraftProvider,
+      settings.customCopilotModels,
       settings.customCodexModels,
     ],
   );
@@ -4025,11 +4069,15 @@ const ProviderHealthBanner = memo(function ProviderHealthBanner({
 
   return (
     <div className="pt-3 mx-auto max-w-3xl">
-      <Alert variant={status.status === "error" ? "error" : "warning"}>
-        <CircleAlertIcon />
-        <AlertTitle>
-          {status.provider === "codex" ? "Codex provider status" : `${status.provider} status`}
-        </AlertTitle>
+        <Alert variant={status.status === "error" ? "error" : "warning"}>
+          <CircleAlertIcon />
+          <AlertTitle>
+            {status.provider === "codex"
+              ? "Codex provider status"
+              : status.provider === "copilot"
+                ? "GitHub Copilot provider status"
+                : `${status.provider} status`}
+          </AlertTitle>
         <AlertDescription className="line-clamp-3" title={status.message ?? defaultMessage}>
           {status.message ?? defaultMessage}
         </AlertDescription>
@@ -5194,14 +5242,17 @@ const COMING_SOON_PROVIDER_OPTIONS = [
 
 function getCustomModelOptionsByProvider(settings: {
   customCodexModels: readonly string[];
+  customCopilotModels: readonly string[];
 }): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
   return {
     codex: getAppModelOptions("codex", settings.customCodexModels),
+    copilot: getAppModelOptions("copilot", settings.customCopilotModels),
   };
 }
 
 const PROVIDER_ICON_BY_PROVIDER: Record<ProviderPickerKind, Icon> = {
   codex: OpenAI,
+  copilot: GitHubIcon,
   claudeCode: ClaudeAI,
   cursor: CursorIcon,
 };

@@ -13,6 +13,7 @@ import type {
   ServerProviderStatus,
   ServerProviderStatusState,
 } from "@t3tools/contracts";
+import { CopilotClient } from "@github/copilot-sdk";
 import { Effect, Layer, Option, Result, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
@@ -20,6 +21,7 @@ import { ProviderHealth, type ProviderHealthShape } from "../Services/ProviderHe
 
 const DEFAULT_TIMEOUT_MS = 4_000;
 const CODEX_PROVIDER = "codex" as const;
+const COPILOT_PROVIDER = "copilot" as const;
 
 // ── Pure helpers ────────────────────────────────────────────────────
 
@@ -27,6 +29,11 @@ export interface CommandResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly code: number;
+}
+
+interface CopilotHealthProbeError {
+  readonly _tag: "CopilotHealthProbeError";
+  readonly cause: unknown;
 }
 
 function nonEmptyTrimmed(value: string | undefined): string | undefined {
@@ -290,14 +297,89 @@ export const checkCodexProviderStatus: Effect.Effect<
   } satisfies ServerProviderStatus;
 });
 
+export const checkCopilotProviderStatus: Effect.Effect<ServerProviderStatus> = Effect.gen(
+  function* () {
+    const checkedAt = new Date().toISOString();
+    const probe = yield* Effect.tryPromise({
+      try: async () => {
+        const client = new CopilotClient({ logLevel: "error" });
+        try {
+          await client.start();
+          const [status, authStatus] = await Promise.all([
+            client.getStatus(),
+            client.getAuthStatus().catch(() => undefined),
+          ]);
+          return { status, authStatus };
+        } finally {
+          await client.stop().catch(() => []);
+        }
+      },
+      catch: (cause) =>
+        ({
+          _tag: "CopilotHealthProbeError",
+          cause,
+        }) satisfies CopilotHealthProbeError,
+    }).pipe(Effect.timeoutOption(DEFAULT_TIMEOUT_MS), Effect.result);
+
+    if (Result.isFailure(probe)) {
+      const error = probe.failure.cause;
+      return {
+        provider: COPILOT_PROVIDER,
+        status: "error" as const,
+        available: false,
+        authStatus: "unknown" as const,
+        checkedAt,
+        message:
+          error instanceof Error
+            ? `Failed to start GitHub Copilot CLI health check: ${error.message}.`
+            : "Failed to start GitHub Copilot CLI health check.",
+      };
+    }
+
+    if (Option.isNone(probe.success)) {
+      return {
+        provider: COPILOT_PROVIDER,
+        status: "error" as const,
+        available: false,
+        authStatus: "unknown" as const,
+        checkedAt,
+        message: "GitHub Copilot CLI health check timed out while starting the SDK client.",
+      };
+    }
+
+    const authStatus: ServerProviderAuthStatus =
+      probe.success.value.authStatus?.isAuthenticated === true
+        ? "authenticated"
+        : probe.success.value.authStatus?.isAuthenticated === false
+          ? "unauthenticated"
+          : "unknown";
+    const status: ServerProviderStatusState =
+      authStatus === "unauthenticated" ? "error" : authStatus === "unknown" ? "warning" : "ready";
+
+    return {
+      provider: COPILOT_PROVIDER,
+      status,
+      available: true,
+      authStatus,
+      checkedAt,
+      ...(probe.success.value.authStatus?.statusMessage
+        ? { message: probe.success.value.authStatus.statusMessage }
+        : probe.success.value.status?.version
+          ? { message: `GitHub Copilot CLI ${probe.success.value.status.version}` }
+          : {}),
+    } satisfies ServerProviderStatus;
+  },
+);
+
 // ── Layer ───────────────────────────────────────────────────────────
 
 export const ProviderHealthLive = Layer.effect(
   ProviderHealth,
   Effect.gen(function* () {
     const codexStatus = yield* checkCodexProviderStatus;
+    const copilotStatus = yield* checkCopilotProviderStatus;
     return {
-      getStatuses: Effect.succeed([codexStatus]),
+      getStatuses: Effect.succeed([codexStatus, copilotStatus]),
     } satisfies ProviderHealthShape;
   }),
 );

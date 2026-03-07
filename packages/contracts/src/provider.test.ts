@@ -34,6 +34,26 @@ describe("ProviderSessionStartInput", () => {
     expect(parsed.providerOptions?.codex?.homePath).toBe("/tmp/.codex");
   });
 
+  it("accepts copilot-compatible payloads", () => {
+    const parsed = decodeProviderSessionStartInput({
+      threadId: "thread-2",
+      provider: "copilot",
+      cwd: "/tmp/workspace",
+      model: "gpt-5.4",
+      runtimeMode: "full-access",
+      providerOptions: {
+        copilot: {
+          cliPath: "/usr/local/bin/copilot",
+          configDir: "/tmp/.copilot",
+        },
+      },
+    });
+
+    expect(parsed.provider).toBe("copilot");
+    expect(parsed.providerOptions?.copilot?.cliPath).toBe("/usr/local/bin/copilot");
+    expect(parsed.providerOptions?.copilot?.configDir).toBe("/tmp/.copilot");
+  });
+
   it("rejects payloads without runtime mode", () => {
     expect(() =>
       decodeProviderSessionStartInput({
@@ -60,5 +80,18 @@ describe("ProviderSendTurnInput", () => {
     expect(parsed.model).toBe("gpt-5.3-codex");
     expect(parsed.modelOptions?.codex?.reasoningEffort).toBe("xhigh");
     expect(parsed.modelOptions?.codex?.fastMode).toBe(true);
+  });
+
+  it("accepts copilot model payloads without provider-specific options", () => {
+    const parsed = decodeProviderSendTurnInput({
+      threadId: "thread-2",
+      model: "gpt-5.4",
+      modelOptions: {
+        copilot: {},
+      },
+    });
+
+    expect(parsed.model).toBe("gpt-5.4");
+    expect(parsed.modelOptions?.copilot).toEqual({});
   });
 });
