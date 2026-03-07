@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+
 import {
   type ChatAttachment,
   CommandId,
@@ -196,6 +198,32 @@ const make = Effect.gen(function* () {
     return readModel.threads.find((entry) => entry.id === threadId);
   });
 
+  const resolveUsableThreadWorkspaceCwd = Effect.fnUntraced(function* (threadId: ThreadId) {
+    const readModel = yield* orchestrationEngine.getReadModel();
+    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    if (!thread) {
+      return yield* Effect.die(new Error(`Thread '${threadId}' was not found in read model.`));
+    }
+
+    const resolvedCwd = resolveThreadWorkspaceCwd({
+      thread,
+      projects: readModel.projects,
+    });
+    if (!resolvedCwd) {
+      return { thread, cwd: undefined as string | undefined };
+    }
+
+    if (existsSync(resolvedCwd)) {
+      return { thread, cwd: resolvedCwd };
+    }
+
+    yield* Effect.logWarning("provider command reactor ignoring missing thread workspace cwd", {
+      threadId,
+      cwd: resolvedCwd,
+    });
+    return { thread, cwd: undefined as string | undefined };
+  });
+
   const ensureSessionForThread = Effect.fnUntraced(function* (
     threadId: ThreadId,
     createdAt: string,
@@ -207,11 +235,7 @@ const make = Effect.gen(function* () {
       readonly providerOptions?: ProviderStartOptions;
     },
   ) {
-    const readModel = yield* orchestrationEngine.getReadModel();
-    const thread = readModel.threads.find((entry) => entry.id === threadId);
-    if (!thread) {
-      return yield* Effect.die(new Error(`Thread '${threadId}' was not found in read model.`));
-    }
+    const { thread, cwd: effectiveCwd } = yield* resolveUsableThreadWorkspaceCwd(threadId);
 
     const desiredRuntimeMode = thread.runtimeMode;
     const currentProvider =
@@ -220,10 +244,6 @@ const make = Effect.gen(function* () {
         : undefined;
     const preferredProvider: ProviderKind | undefined = options?.provider ?? currentProvider;
     const desiredModel = options?.model ?? thread.model;
-    const effectiveCwd = resolveThreadWorkspaceCwd({
-      thread,
-      projects: readModel.projects,
-    });
 
     const resolveActiveSession = (threadId: ThreadId) =>
       providerService.listSessions().pipe(

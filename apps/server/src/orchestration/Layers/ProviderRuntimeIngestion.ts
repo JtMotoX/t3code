@@ -648,8 +648,18 @@ const make = Effect.gen(function* () {
     commandTag: string;
     finalDeltaCommandTag: string;
     fallbackText?: string;
+    existingMessage?: {
+      readonly id: MessageId;
+      readonly text: string;
+      readonly streaming: boolean;
+    };
   }) =>
     Effect.gen(function* () {
+      if (input.existingMessage && !input.existingMessage.streaming) {
+        yield* clearAssistantMessageState(input.messageId);
+        return;
+      }
+
       const bufferedText = yield* takeBufferedAssistantText(input.messageId);
       const sawDelta = yield* takeAssistantMessageSawDelta(input.messageId);
       const text =
@@ -658,6 +668,11 @@ const make = Effect.gen(function* () {
           : !sawDelta && (input.fallbackText?.trim().length ?? 0) > 0
             ? input.fallbackText!
             : "";
+
+      if (text.length === 0 && !input.existingMessage) {
+        yield* clearAssistantMessageState(input.messageId);
+        return;
+      }
 
       if (text.length > 0) {
         yield* orchestrationEngine.dispatch({
@@ -798,6 +813,9 @@ const make = Effect.gen(function* () {
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
+      const existingAssistantMessageById = new Map(
+        thread.messages.map((message) => [message.id, message] as const),
+      );
 
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
@@ -969,6 +987,9 @@ const make = Effect.gen(function* () {
           createdAt: now,
           commandTag: "assistant-complete",
           finalDeltaCommandTag: "assistant-delta-finalize",
+          ...(existingAssistantMessageById.has(assistantMessageId)
+            ? { existingMessage: existingAssistantMessageById.get(assistantMessageId)! }
+            : {}),
           ...(assistantCompletion.fallbackText !== undefined
             ? { fallbackText: assistantCompletion.fallbackText }
             : {}),
@@ -1006,6 +1027,9 @@ const make = Effect.gen(function* () {
                 createdAt: now,
                 commandTag: "assistant-complete-finalize",
                 finalDeltaCommandTag: "assistant-delta-finalize-fallback",
+                ...(existingAssistantMessageById.has(assistantMessageId)
+                  ? { existingMessage: existingAssistantMessageById.get(assistantMessageId)! }
+                  : {}),
               }),
             { concurrency: 1 },
           ).pipe(Effect.asVoid);

@@ -17,8 +17,8 @@ import {
 } from "@t3tools/contracts";
 import {
   CopilotClient,
+  type CopilotClientOptions,
   type ModelInfo,
-  type CopilotSession,
   type PermissionRequest,
   type PermissionRequestResult,
   type SessionEvent,
@@ -47,6 +47,7 @@ const TURN_START_TIMEOUT_MS = 1_500;
 
 export interface CopilotAdapterLiveOptions {
   readonly nativeEventLogger?: EventNdjsonLogger;
+  readonly clientFactory?: (options: CopilotClientOptions) => CopilotClientHandle;
 }
 
 interface PendingApprovalRequest {
@@ -76,8 +77,8 @@ interface PendingUserInputRequest {
 }
 
 interface ActiveCopilotSession {
-  readonly client: CopilotClient;
-  session: CopilotSession;
+  readonly client: CopilotClientHandle;
+  session: CopilotSessionHandle;
   readonly threadId: ThreadId;
   readonly createdAt: string;
   readonly runtimeMode: ProviderSession["runtimeMode"];
@@ -92,6 +93,26 @@ interface ActiveCopilotSession {
   pendingApprovalResolvers: Map<string, PendingApprovalRequest>;
   pendingUserInputResolvers: Map<string, PendingUserInputRequest>;
   unsubscribe: () => void;
+}
+
+interface CopilotSessionHandle {
+  readonly sessionId: string;
+  destroy(): Promise<void>;
+  on(handler: (event: SessionEvent) => void): () => void;
+  send(options: { prompt: string; attachments?: unknown; mode?: string }): Promise<string>;
+  abort(): Promise<void>;
+  getMessages(): Promise<SessionEvent[]>;
+}
+
+interface CopilotClientHandle {
+  start(): Promise<void>;
+  listModels(): Promise<ModelInfo[]>;
+  createSession(config: Parameters<CopilotClient["createSession"]>[0]): Promise<CopilotSessionHandle>;
+  resumeSession(
+    sessionId: string,
+    config: Parameters<CopilotClient["resumeSession"]>[1],
+  ): Promise<CopilotSessionHandle>;
+  stop(): Promise<Error[]>;
 }
 
 function toMessage(cause: unknown, fallback: string): string {
@@ -842,7 +863,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
     };
 
     const validateSessionConfiguration = (input: {
-      readonly client: CopilotClient;
+      readonly client: CopilotClientHandle;
       readonly threadId: ThreadId;
       readonly model: string | undefined;
       readonly reasoningEffort: CodexReasoningEffort | undefined;
@@ -851,6 +872,17 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
         if (!input.model && !input.reasoningEffort) {
           return;
         }
+
+        yield* Effect.tryPromise({
+          try: () => input.client.start(),
+          catch: (cause) =>
+            new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+              detail: toMessage(cause, "Failed to start GitHub Copilot client."),
+              cause,
+            }),
+        });
 
         const supportedModels = mapSupportedModelsById(
           yield* Effect.tryPromise({
@@ -952,8 +984,8 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
 
     const createSessionRecord = (input: {
       readonly threadId: ThreadId;
-      readonly client: CopilotClient;
-      readonly session: CopilotSession;
+      readonly client: CopilotClientHandle;
+      readonly session: CopilotSessionHandle;
       readonly runtimeMode: ProviderSession["runtimeMode"];
       readonly pendingApprovalResolvers: Map<string, PendingApprovalRequest>;
       readonly pendingUserInputResolvers: Map<string, PendingUserInputRequest>;
@@ -1064,11 +1096,12 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
           trimToUndefined(input.providerOptions?.copilot?.cliPath) ?? resolveBundledCopilotCliPath();
         const configDir = trimToUndefined(input.providerOptions?.copilot?.configDir);
         const resumeSessionId = extractResumeSessionId(input.resumeCursor);
-        const client = new CopilotClient({
+        const clientOptions: CopilotClientOptions = {
           ...(cliPath ? { cliPath } : {}),
           ...(input.cwd ? { cwd: input.cwd } : {}),
           logLevel: "error",
-        });
+        };
+        const client = options?.clientFactory?.(clientOptions) ?? new CopilotClient(clientOptions);
         const pendingApprovalResolvers = new Map<string, PendingApprovalRequest>();
         const pendingUserInputResolvers = new Map<string, PendingUserInputRequest>();
         const reasoningEffort = getCopilotReasoningEffort(input.modelOptions);

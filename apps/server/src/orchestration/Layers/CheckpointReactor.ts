@@ -12,6 +12,7 @@ import { Cause, Effect, Layer, Option, Queue, Stream } from "effect";
 import { parseTurnDiffFilesFromUnifiedDiff } from "../../checkpointing/Diffs.ts";
 import {
   checkpointRefForThreadTurn,
+  resolveExistingThreadWorkspaceCwd,
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
@@ -144,6 +145,46 @@ const make = Effect.gen(function* () {
     return Option.none();
   });
 
+  const resolveUsableWorkspaceCwdForThread = Effect.fnUntraced(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId?: TurnId | null;
+    readonly context: "checkpoint capture" | "checkpoint pre-turn capture";
+  }) {
+    const readModel = yield* orchestrationEngine.getReadModel();
+    const thread = readModel.threads.find((entry) => entry.id === input.threadId);
+    if (!thread) {
+      return { thread: undefined, cwd: undefined as string | undefined };
+    }
+
+    const threadWorkspaceCwd = resolveThreadWorkspaceCwd({
+      thread,
+      projects: readModel.projects,
+    });
+    const existingThreadWorkspaceCwd = resolveExistingThreadWorkspaceCwd({
+      thread,
+      projects: readModel.projects,
+    });
+    if (threadWorkspaceCwd && !existingThreadWorkspaceCwd) {
+      yield* Effect.logWarning(`${input.context} ignoring missing thread workspace cwd`, {
+        threadId: input.threadId,
+        ...(input.turnId ? { turnId: input.turnId } : {}),
+        cwd: threadWorkspaceCwd,
+      });
+    }
+
+    if (existingThreadWorkspaceCwd) {
+      return { thread, cwd: existingThreadWorkspaceCwd };
+    }
+
+    const sessionRuntime = yield* resolveSessionRuntimeForThread(input.threadId);
+    const sessionCwd = Option.match(sessionRuntime, {
+      onNone: () => undefined,
+      onSome: (runtime) => runtime.cwd,
+    });
+
+    return { thread, cwd: sessionCwd };
+  });
+
   const captureCheckpointFromTurnCompletion = Effect.fnUntraced(function* (
     event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>,
   ) {
@@ -152,8 +193,11 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const readModel = yield* orchestrationEngine.getReadModel();
-    const thread = readModel.threads.find((entry) => entry.id === event.threadId);
+    const { thread, cwd: checkpointCwd } = yield* resolveUsableWorkspaceCwdForThread({
+      threadId: event.threadId,
+      turnId,
+      context: "checkpoint capture",
+    });
     if (!thread) {
       return;
     }
@@ -166,17 +210,6 @@ const make = Effect.gen(function* () {
     if (thread.checkpoints.some((checkpoint) => checkpoint.turnId === turnId)) {
       return;
     }
-
-    const sessionRuntime = yield* resolveSessionRuntimeForThread(thread.id);
-    const checkpointCwd =
-      Option.match(sessionRuntime, {
-        onNone: () => undefined,
-        onSome: (runtime) => runtime.cwd,
-      }) ??
-      resolveThreadWorkspaceCwd({
-        thread,
-        projects: readModel.projects,
-      });
     if (!checkpointCwd) {
       yield* Effect.logWarning("checkpoint capture skipped: no active provider session cwd", {
         threadId: thread.id,
@@ -294,24 +327,14 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const readModel = yield* orchestrationEngine.getReadModel();
-    const thread = readModel.threads.find(
-      (entry) => entry.id === event.threadId,
-    );
+    const { thread, cwd: checkpointCwd } = yield* resolveUsableWorkspaceCwdForThread({
+      threadId: event.threadId,
+      turnId,
+      context: "checkpoint pre-turn capture",
+    });
     if (!thread) {
       return;
     }
-
-    const checkpointCwdFromThreadOrProject = resolveThreadWorkspaceCwd({
-      thread,
-      projects: readModel.projects,
-    });
-    const checkpointCwd =
-      checkpointCwdFromThreadOrProject ??
-      Option.match(yield* resolveSessionRuntimeForThread(thread.id), {
-        onNone: () => undefined,
-        onSome: (runtime) => runtime.cwd,
-      });
     if (!checkpointCwd) {
       yield* Effect.logWarning("checkpoint pre-turn capture skipped: no workspace cwd", {
         threadId: thread.id,
@@ -356,22 +379,13 @@ const make = Effect.gen(function* () {
     }
 
     const threadId = event.payload.threadId;
-    const readModel = yield* orchestrationEngine.getReadModel();
-    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    const { thread, cwd: checkpointCwd } = yield* resolveUsableWorkspaceCwdForThread({
+      threadId,
+      context: "checkpoint pre-turn capture",
+    });
     if (!thread) {
       return;
     }
-
-    const checkpointCwdFromThreadOrProject = resolveThreadWorkspaceCwd({
-      thread,
-      projects: readModel.projects,
-    });
-    const checkpointCwd =
-      checkpointCwdFromThreadOrProject ??
-      Option.match(yield* resolveSessionRuntimeForThread(threadId), {
-        onNone: () => undefined,
-        onSome: (runtime) => runtime.cwd,
-      });
     if (!checkpointCwd) {
       yield* Effect.logWarning("checkpoint pre-turn capture skipped: no workspace cwd", {
         threadId,
