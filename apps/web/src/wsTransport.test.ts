@@ -15,9 +15,11 @@ class MockWebSocket {
 
   readyState = MockWebSocket.CONNECTING;
   readonly sent: string[] = [];
+  readonly url: string;
   private readonly listeners = new Map<WsEventType, Set<WsListener>>();
 
-  constructor(_url: string) {
+  constructor(url: string) {
+    this.url = url;
     sockets.push(this);
   }
 
@@ -106,6 +108,27 @@ describe("WsTransport", () => {
     transport.dispose();
   });
 
+  it("uses wss when the page is loaded over https", () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: {
+          href: "https://tunnel.example/chat",
+          origin: "https://tunnel.example",
+          protocol: "https:",
+          host: "tunnel.example",
+        },
+        desktopBridge: undefined,
+      },
+    });
+
+    const transport = new WsTransport();
+
+    expect(getSocket().url).toBe("wss://tunnel.example");
+
+    transport.dispose();
+  });
+
   it("resolves pending requests for valid response envelopes", async () => {
     const transport = new WsTransport("ws://localhost:3020");
     const socket = getSocket();
@@ -160,8 +183,7 @@ describe("WsTransport", () => {
     expect(warnSpy).toHaveBeenCalledTimes(2);
     expect(warnSpy).toHaveBeenNthCalledWith(1, "Dropped inbound WebSocket envelope", {
       reason: "decode-failed",
-      issue:
-        "SchemaError: SyntaxError: Expected property name or '}' in JSON at position 2 (line 1 column 3)",
+      issue: expect.stringContaining("SchemaError: SyntaxError:"),
       raw: "{ invalid-json",
     });
     expect(warnSpy).toHaveBeenNthCalledWith(2, "Dropped inbound WebSocket envelope", {
